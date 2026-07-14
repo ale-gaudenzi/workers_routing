@@ -1,0 +1,41 @@
+Day;Team;Cliente;Arrivo;Partenza;Durata Lavoro Effettivo (min);Note
+1;1;Imeca;08:01;08:01;0;
+1;1;Morandi Montaggi;08:52;09:52;60;
+1;1;Bonomi;10:00;14:00;180;Pausa inclusa (60 min)
+1;1;ALER;14:12;17:12;180;
+1;1;Imeca;17:55;17:55;0;
+;;;;;;
+2;1;Imeca;08:16;08:16;0;
+2;1;Simone AT;09:00;17:00;420;Pausa inclusa (60 min)
+2;1;Imeca;17:44;17:44;0;
+;;;;;;
+3;1;Imeca;08:22;08:22;0;
+3;1;Orobica Food;10:00;14:00;180;Pausa inclusa (60 min)
+3;1;Euroswitch;14:39;16:39;120;
+3;1;Imeca;17:50;17:50;0;
+;;;;;;
+4;1;Imeca;08:17;08:17;0;
+4;1;Belfiore Pietro;08:48;10:48;120;
+4;1;Pelamatti Simone;11:00;14:00;120;Pausa inclusa (60 min)
+4;1;Salvetti Giovanna;14:05;17:05;180;
+4;1;Imeca;17:48;17:48;0;
+;;;;;;
+5;1;Imeca;08:00;08:00;0;
+5;1;Piccinelli Silvana;08:39;09:39;60;
+5;1;Piccinelli Mariangela;09:39;11:39;120;
+5;1;Rivadossi Maddalena;11:53;15:23;150;Pausa inclusa (60 min)
+5;1;Piccinelli Silvana;15:37;16:07;30;
+5;1;ALER;16:17;17:17;60;
+5;1;Imeca;18:00;18:00;0;
+;;;;;;
+6;1;Imeca;08:07;08:07;0;
+6;1;Piccinelli Silvana;08:46;11:46;180;
+6;1;Pausa Pranzo;11:46;12:46;60;
+6;1;Rivadossi Maddalena;13:00;16:30;210;
+6;1;Piccinelli Silvana;16:44;17:14;30;
+6;1;Imeca;17:53;17:53;0;
+;;;;;;
+7;1;Imeca;08:01;08:01;0;
+7;1;Asilo Piancogno;09:00;14:00;240;Pausa inclusa (60 min)
+7;1;Comune di Piamborno;14:18;17:18;180;
+7;1;Imeca;17:59;17:59;0;
