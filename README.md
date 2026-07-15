@@ -4,22 +4,18 @@ This repository contains the `workers_routing` application. The installation and
 
 ## Quick Start (Automated Setup)
 
-You can download and run the setup script directly from your terminal. 
 
 ### Windows
 
-Open Command Prompt (`cmd`) and run the following command to download and execute the batch script:
+Open PowerShell and run the following command to download and execute the batch script:
 
-```cmd
-curl -O [https://raw.githubusercontent.com/ale-gaudenzi/workers_routing/main/install_and_run.bat](https://raw.githubusercontent.com/ale-gaudenzi/workers_routing/main/install_and_run.bat) && install_and_run.bat
-
+```powershell
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/ale-gaudenzi/workers_routing/main/install_and_run.bat" -OutFile "install_and_run.bat"; .\install_and_run.bat
 ```
 
 *Note: If the script installs Git or Python via winget, it will prompt you to press any key to exit. After the window closes, run `install_and_run.bat` a second time to load the new environment variables and proceed with the application setup.*
 
 ### Linux / macOS
-
-Open your terminal and run the following command to download the script, make it executable, and run it:
 
 ```bash
 curl -O [https://raw.githubusercontent.com/ale-gaudenzi/workers_routing/main/install_and_run.sh](https://raw.githubusercontent.com/ale-gaudenzi/workers_routing/main/install_and_run.sh) && chmod +x install_and_run.sh && ./install_and_run.sh
