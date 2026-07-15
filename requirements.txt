@@ -2,3 +2,4 @@ geopy==2.5.0
 ortools==9.15.6755
 pandas==3.0.3
 Requests==2.34.2
+openpyxl
