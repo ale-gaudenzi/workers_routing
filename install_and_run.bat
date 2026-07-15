@@ -39,7 +39,8 @@ if not exist %DIR_NAME% (
     echo Cloning repository...
     git clone %REPO_URL%
 ) else (
-    echo Directory already exists. Skipping clone.
+    echo Directory already exists. Pulling latest changes...
+    git -C %DIR_NAME% pull
 )
 
 cd %DIR_NAME%
