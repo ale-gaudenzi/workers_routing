@@ -244,8 +244,13 @@ def print_solution(data, manager, routing, solution, clients, num_teams, start_h
 
 
 def run_gui():
+
     def browse_file():
-        filename = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx")])
+        # Added .xlsm for macro-enabled workbooks and .xls for legacy formats
+        filename = filedialog.askopenfilename(filetypes=[
+            ("Excel files", "*.xlsx *.xlsm *.xls"),
+            ("All files", "*.*")
+        ])
         entry_file.delete(0, tk.END)
         entry_file.insert(0, filename)
 
@@ -302,25 +307,6 @@ def run_gui():
 
     root.mainloop()
 
+
 if __name__ == '__main__':
     run_gui()
-'''
-if __name__ == '__main__':
-    # Define execution variables
-    EXCEL_FILE_PATH = 'prova.xlsx'
-    DEPOT_ADDRESS = 'Ceto' 
-    NUMBER_OF_TEAMS = 1
-    WORKDAY_START_HOUR = 8
-    WORKDAY_END_HOUR = 18
-    LUNCH_BREAK_HOURS = 1.0
-
-    # Execute script
-    optimize_schedule(
-        file_path=EXCEL_FILE_PATH, 
-        depot_location=DEPOT_ADDRESS, 
-        num_teams=NUMBER_OF_TEAMS, 
-        start_hour=WORKDAY_START_HOUR, 
-        end_hour=WORKDAY_END_HOUR,
-        lunch_break_hours=LUNCH_BREAK_HOURS
-    )
-    '''
