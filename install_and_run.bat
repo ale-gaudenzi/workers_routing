@@ -1,70 +1,67 @@
 @echo off
-setlocal
-
-REM Flag to track if a new installation occurred
-set RESTART_REQUIRED=0
+REM =======================================================
+REM Setup and Execution Script for Worker Task Scheduler
+REM =======================================================
 
 REM Check if Git is installed
-where git >nul 2>&1
-if %errorlevel% neq 0 (
-    echo Git not found. Attempting automatic installation via winget...
-    winget install --id Git.Git -e --source winget --accept-package-agreements --accept-source-agreements --silent
-    set RESTART_REQUIRED=1
-)
-
-REM Check if Python is installed
-where python >nul 2>&1
-if %errorlevel% neq 0 (
-    echo Python not found. Attempting automatic installation via winget...
-    winget install --id Python.Python.3.11 -e --source winget --accept-package-agreements --accept-source-agreements --silent
-    set RESTART_REQUIRED=1
-)
-
-REM If installations were performed, the PATH variable needs to be refreshed
-if %RESTART_REQUIRED%==1 (
-    echo.
-    echo System dependencies have been installed.
-    echo The script must be restarted to load the new environment variables.
-    echo Please press any key to exit, then double-click this script again.
-    pause >nul
+git --version >nul 2>&1
+IF %ERRORLEVEL% NEQ 0 (
+    echo Error: Git is not installed or not added to system PATH.
+    echo Please install Git and run this script again.
+    pause
     exit /b
 )
 
-REM Define repository URL and target directory
-set REPO_URL=https://github.com/ale-gaudenzi/workers_routing.git
-set DIR_NAME=workers_routing
-
-REM Clone the repository if it does not exist locally
-if not exist %DIR_NAME% (
-    echo Cloning repository...
-    git clone %REPO_URL%
-) else (
-    echo Directory already exists. Pulling latest changes...
-    git -C %DIR_NAME% pull
+REM Check if the repository directory already exists
+IF NOT EXIST "workers_routing" (
+    echo Repository not found. Cloning repository...
+    git clone https://github.com/ale-gaudenzi/workers_routing.git
+    IF %ERRORLEVEL% NEQ 0 (
+        echo Error: Failed to clone the repository.
+        pause
+        exit /b
+    )
+    cd workers_routing
+) ELSE (
+    echo Repository found. Navigating and pulling latest changes...
+    cd workers_routing
+    git pull
+    IF %ERRORLEVEL% NEQ 0 (
+        echo Error: Failed to pull the latest changes.
+        pause
+        exit /b
+    )
 )
 
-cd %DIR_NAME%
+REM Check if Python is installed
+python --version >nul 2>&1
+IF %ERRORLEVEL% NEQ 0 (
+    echo Error: Python is not installed or not added to system PATH.
+    echo Please install Python and run this script again.
+    pause
+    exit /b
+)
 
 REM Create a virtual environment if it does not exist
-if not exist venv (
+IF NOT EXIST "venv\Scripts\activate.bat" (
     echo Creating virtual environment...
     python -m venv venv
 )
 
 REM Activate the virtual environment
 echo Activating virtual environment...
-call venv\Scripts\activate
+call venv\Scripts\activate.bat
 
-REM Install dependencies
-if exist requirements.txt (
-    echo Installing requirements...
-    python -m pip install --upgrade pip >nul 2>&1
-    pip install -r requirements.txt
-)
+REM Upgrade pip to the latest version
+echo Upgrading pip...
+python -m pip install --upgrade pip
+
+REM Install required dependencies
+echo Installing required dependencies...
+pip install pandas openpyxl geopy
 
 REM Run the main application
 echo Starting the application...
 python main.py
 
-REM Keep the window open after execution
 pause

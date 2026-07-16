@@ -1,312 +1,363 @@
-import pandas as pd
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox
+import pandas as pd
+import time
+from geopy.geocoders import Nominatim
+from geopy.exc import GeocoderTimedOut
+from geopy.distance import geodesic
+from datetime import datetime, timedelta
+import os
 
-from ortools.constraint_solver import routing_enums_pb2
-from ortools.constraint_solver import pywrapcp
-from geotime import geocode_locations, create_time_matrix, format_time
+def geocode_location(address):
+    geolocator = Nominatim(user_agent="worker_scheduler_v6")
+    try:
+        # Enforce delay to respect API rate limits
+        time.sleep(1.2)
+        location = geolocator.geocode(address, timeout=10)
+        if location:
+            return location.latitude, location.longitude
+        return None, None
+    except GeocoderTimedOut:
+        return None, None
 
-
-def create_data_model(time_matrix, service_times_minutes, total_routes, start_hour, end_hour):
-    data = {}
-    data['time_matrix'] = time_matrix
-    data['service_times'] = service_times_minutes
-    data['num_vehicles'] = total_routes
-    data['depot'] = 0
-    shift_duration_minutes = (end_hour - start_hour) * 60
-    data['vehicle_max_time'] = shift_duration_minutes
-    return data
-
-
-def optimize_schedule(file_path, depot_location, num_teams=1, start_hour=8, end_hour=18, lunch_break_hours=1.0):
-    """
-    Main execution function to read data, build the model, and solve the routing problem.
-    Splits tasks into 0.5-hour chunks and enforces a lunch break between 12:00 and 14:00.
-    """
-    print(f"Loading data from {file_path}...")
-    df = pd.read_excel(file_path)
+def format_duration(td):
+    total_minutes = int(td.total_seconds() // 60)
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
     
-    if 'Tempo' not in df.columns:
-        df['Tempo'] = 1.0 
-        print("Column 'Tempo' missing. Applied default 1 hour for all tasks.")
-        
-    # Split tasks into smaller chunks (0.5 hours) to allow precise lunch break interruptions
-    max_chunk_hours = 0.5
-    split_rows = []
-    
-    for _, row in df.iterrows():
-        duration = row['Tempo']
-        if pd.isna(duration) or duration <= 0:
-            duration = 1.0
-            
-        client_name = str(row.get('Cliente', 'Unknown'))
-        if pd.isna(row.get('Cliente')):
-            client_name = "Unknown"
-            
-        part = 1
-        while duration > max_chunk_hours:
-            split_row = row.copy()
-            split_row['Tempo'] = max_chunk_hours
-            split_row['Cliente'] = f"{client_name} (Part {part})"
-            split_rows.append(split_row)
-            duration -= max_chunk_hours
-            part += 1
-            
-        if duration > 0:
-            final_row = row.copy()
-            final_row['Tempo'] = duration
-            if part > 1:
-                final_row['Cliente'] = f"{client_name} (Part {part})"
-            else:
-                final_row['Cliente'] = client_name
-            split_rows.append(final_row)
-            
-    df = pd.DataFrame(split_rows)
-    
-    locations = [depot_location] + df['Ubicazione'].tolist()
-    durations_hours = df['Tempo'].tolist()
-    service_times_minutes = [0] + [int(hours * 60) for hours in durations_hours]
-    clients = ["Imeca"] + df['Cliente'].tolist()
-    
-    print("Geocoding addresses...")
-    coordinates = geocode_locations(locations)
-    
-    print("Calculating travel time matrix...")
-    time_matrix = create_time_matrix(coordinates)
-    
-    # Overestimate max possible days to ensure the solver has enough empty route variables
-    max_possible_days = len(df)
-    total_routes = num_teams * max_possible_days
-    
-    data = create_data_model(time_matrix, service_times_minutes, total_routes, start_hour, end_hour)
-    
-    manager = pywrapcp.RoutingIndexManager(
-        len(data['time_matrix']), data['num_vehicles'], data['depot']
-    )
-    routing = pywrapcp.RoutingModel(manager)
-
-    def time_callback(from_index, to_index):
-        from_node = manager.IndexToNode(from_index)
-        to_node = manager.IndexToNode(to_index)
-        return data['time_matrix'][from_node][to_node] + data['service_times'][from_node]
-
-    transit_callback_index = routing.RegisterTransitCallback(time_callback)
-    routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
-    
-    # High fixed cost encourages using as few days as possible
-    routing.SetFixedCostOfAllVehicles(10000)
-
-    time = 'Time'
-    routing.AddDimension(
-        transit_callback_index,
-        60, # Slack time to absorb breaks and waits
-        data['vehicle_max_time'], 
-        False,  
-        time
-    )
-    time_dimension = routing.GetDimensionOrDie(time)
-
-    # Disjunction penalty allows the solver to drop tasks instead of failing completely
-    penalty = 1000000
-    for node in range(1, len(data['time_matrix'])):
-        routing.AddDisjunction([manager.NodeToIndex(node)], penalty)
-
-    # Configure lunch break between 12:00 and 14:00
-    # Calculate the relative start time in minutes from the shift start hour
-    lunch_window_start_hour = 12
-    lunch_window_end_hour = 14
-    
-    break_start_min = int(max(0, lunch_window_start_hour - start_hour) * 60)
-    break_start_max = int(max(0, lunch_window_end_hour - start_hour - lunch_break_hours) * 60)
-    lunch_break_minutes = int(lunch_break_hours * 60)
-    
-    if lunch_break_minutes > 0 and break_start_max >= break_start_min:
-        for vehicle_id in range(data['num_vehicles']):
-            break_interval = routing.solver().FixedDurationIntervalVar(
-                break_start_min, 
-                break_start_max, 
-                lunch_break_minutes, 
-                False, 
-                f"Lunch_Break_{vehicle_id}"
-            )
-            # Passing data['service_times'] allows the break to interrupt a task chunk
-            time_dimension.SetBreakIntervalsOfVehicle([break_interval], vehicle_id, data['service_times'])
-
-    search_parameters = pywrapcp.DefaultRoutingSearchParameters()
-    search_parameters.first_solution_strategy = (
-        routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
-    )
-    search_parameters.local_search_metaheuristic = (
-        routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-    )
-    search_parameters.time_limit.FromSeconds(20)
-
-    print("Solving optimization problem...")
-    solution = routing.SolveWithParameters(search_parameters)
-
-    if solution:
-        print_solution(data, manager, routing, solution, clients, num_teams, start_hour, lunch_break_minutes)
+    if hours > 0 and minutes > 0:
+        return f"{hours}h {minutes}m"
+    elif hours > 0:
+        return f"{hours}h"
     else:
-        print("No solution found. Check input constraints.")
+        return f"{minutes}m"
 
-
-def print_solution(data, manager, routing, solution, clients, num_teams, start_hour, lunch_break_minutes):
-    """
-    Outputs the optimized routing solution as a CSV file and console string,
-    merging contiguous tasks and adding an empty row between different days.
-    """
-    import csv
+def simulate_event(current_time, duration, lunch_taken, lunch_start_limit, lunch_dur):
+    # Calculates the final time and lunch status for any duration without logging it
+    t = current_time
+    l_taken = lunch_taken
     
-    time_dimension = routing.GetDimensionOrDie('Time')
-    
-    # ... (parte iniziale di controllo dropped_nodes identica alla precedente) ...
-    dropped_nodes = []
-    for node in range(routing.Size()):
-        if routing.IsStart(node) or routing.IsEnd(node):
-            continue
-        if solution.Value(routing.NextVar(node)) == node:
-            dropped_nodes.append(clients[manager.IndexToNode(node)])
-            
-    if dropped_nodes:
-        print("\nWARNING: The following tasks could not be scheduled:")
-        for dropped in dropped_nodes:
-            print(f"  - {dropped}")
-        print("\n")
-
-    team_day_counters = {team: 1 for team in range(1, num_teams + 1)}
-    
-    csv_rows = []
-    csv_rows.append(["Day", "Team", "Cliente", "Arrivo", "Partenza", "Durata Lavoro Effettivo (min)", "Note"])
-
-    last_day = 1
-    
-    for vehicle_id in range(data['num_vehicles']):
-        index = routing.Start(vehicle_id)
-        if routing.IsEnd(solution.Value(routing.NextVar(index))):
-            continue
-            
-        team_index = (vehicle_id % num_teams) + 1
-        current_day = team_day_counters[team_index]
-        team_day_counters[team_index] += 1
-
-        # LOGICA RIGA VUOTA: se il giorno è cambiato rispetto al precedente, aggiunge una riga vuota
-        if current_day > last_day:
-            csv_rows.append(["", "", "", "", "", "", ""])
-            last_day = current_day
-            
-        route_nodes = []
-        while not routing.IsEnd(index):
-            node_index = manager.IndexToNode(index)
-            time_var = time_dimension.CumulVar(index)
-            arrival = solution.Min(time_var)
-            duration = data['service_times'][node_index]
-            client_raw = clients[node_index]
-            base_client = client_raw.split(" (Part ")[0] if " (Part " in client_raw else client_raw
-            route_nodes.append({'node_index': node_index, 'client': base_client, 'arrival': arrival, 'duration': duration})
-            index = solution.Value(routing.NextVar(index))
-            
-        # Add final depot return
-        node_index = manager.IndexToNode(index)
-        time_var = time_dimension.CumulVar(index)
-        route_nodes.append({'node_index': node_index, 'client': clients[node_index], 'arrival': solution.Min(time_var), 'duration': 0})
+    if duration.total_seconds() == 0:
+        return t, l_taken
         
-        # Merge contiguous chunks
-        grouped = []
-        curr = None
-        for node in route_nodes:
-            if curr is None:
-                curr = {'client': node['client'], 'arrival': node['arrival'], 'duration': node['duration'], 'end_time': node['arrival'] + node['duration'], 'node_index_first': node['node_index'], 'node_index_last': node['node_index']}
-            elif node['client'] == curr['client'] and node['client'] != "Imeca":
-                curr['duration'] += node['duration']
-                curr['end_time'] = node['arrival'] + node['duration']
-                curr['node_index_last'] = node['node_index']
-            else:
-                grouped.append(curr)
-                curr = {'client': node['client'], 'arrival': node['arrival'], 'duration': node['duration'], 'end_time': node['arrival'] + node['duration'], 'node_index_first': node['node_index'], 'node_index_last': node['node_index']}
-        if curr: grouped.append(curr)
+    # If the simulation starts at or after lunch time and lunch hasn't been taken
+    if not l_taken and t >= lunch_start_limit:
+        t += lunch_dur
+        l_taken = True
+        
+    # If the event crosses the lunch start limit
+    if not l_taken and t < lunch_start_limit and (t + duration > lunch_start_limit):
+        t += duration + lunch_dur
+        l_taken = True
+    else:
+        t += duration
+        
+    return t, l_taken
+
+def execute_event(schedule, event_name, location, duration, current_time, lunch_taken, lunch_start_limit, lunch_dur, current_day):
+    # Logs the event to the schedule array, splitting it automatically if it crosses lunch
+    remaining = duration
+    if remaining.total_seconds() == 0:
+        return current_time, lunch_taken
+        
+    # If we are already at or past lunch time and haven't taken it, log lunch immediately
+    if not lunch_taken and current_time >= lunch_start_limit:
+        lunch_end = current_time + lunch_dur
+        schedule.append({
+            "Day": current_day,
+            "Cliente": "LUNCH BREAK",
+            "Ubicazione": "N/A",
+            "Start Time": current_time.strftime("%H:%M"),
+            "End Time": lunch_end.strftime("%H:%M"),
+            "Duration": format_duration(lunch_dur)
+        })
+        current_time = lunch_end
+        lunch_taken = True
+
+    while remaining.total_seconds() > 0:
+        if not lunch_taken and current_time < lunch_start_limit and (current_time + remaining > lunch_start_limit):
+            # Event crosses lunch break limit
+            chunk = lunch_start_limit - current_time
+            if chunk.total_seconds() > 0:
+                label = f"{event_name} (Part 1)"
+                schedule.append({
+                    "Day": current_day,
+                    "Cliente": label,
+                    "Ubicazione": location,
+                    "Start Time": current_time.strftime("%H:%M"),
+                    "End Time": lunch_start_limit.strftime("%H:%M"),
+                    "Duration": format_duration(chunk)
+                })
+                remaining -= chunk
+                current_time = lunch_start_limit
+
+            # Insert lunch
+            lunch_end = current_time + lunch_dur
+            schedule.append({
+                "Day": current_day,
+                "Cliente": "LUNCH BREAK",
+                "Ubicazione": "N/A",
+                "Start Time": current_time.strftime("%H:%M"),
+                "End Time": lunch_end.strftime("%H:%M"),
+                "Duration": format_duration(lunch_dur)
+            })
+            current_time = lunch_end
+            lunch_taken = True
+        else:
+            # Log the remaining chunk of the event
+            label = f"{event_name} (Part 2)" if duration != remaining else event_name
+            end_t = current_time + remaining
+            schedule.append({
+                "Day": current_day,
+                "Cliente": label,
+                "Ubicazione": location,
+                "Start Time": current_time.strftime("%H:%M"),
+                "End Time": end_t.strftime("%H:%M"),
+                "Duration": format_duration(remaining)
+            })
+            current_time = end_t
+            remaining = timedelta(0)
             
-        for i, g in enumerate(grouped):
-            note = f"Pausa inclusa ({g['end_time'] - g['arrival'] - g['duration']} min)" if (g['end_time'] - g['arrival']) > g['duration'] else ""
-            csv_rows.append([str(current_day), str(team_index), g['client'], format_time(start_hour, g['arrival']), format_time(start_hour, g['end_time']), str(g['duration']), note])
-            if i < len(grouped) - 1:
-                next_g = grouped[i+1]
-                gap = next_g['arrival'] - g['end_time'] - data['time_matrix'][g['node_index_last']][next_g['node_index_first']]
-                if lunch_break_minutes > 0 and gap >= lunch_break_minutes:
-                    csv_rows.append([str(current_day), str(team_index), "Pausa Pranzo", format_time(start_hour, g['end_time']), format_time(start_hour, g['end_time'] + gap), str(gap), ""])
+    return current_time, lunch_taken
+
+def process_schedule(file_path, depot, start_time_str, end_time_str, lunch_duration_hours, root):
+    try:
+        df = pd.read_excel(file_path)
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to read file: {e}")
+        return
+    
+    required_columns = {'Ubicazione', 'Tempo', 'Cliente'}
+    if not required_columns.issubset(df.columns):
+        messagebox.showerror("Error", f"Missing columns. Required: {required_columns}")
+        return
+
+    try:
+        start_time_base = datetime.strptime(start_time_str, "%H:%M")
+        end_time_base = datetime.strptime(end_time_str, "%H:%M")
+    except ValueError:
+        messagebox.showerror("Error", "Invalid time format. Use HH:MM.")
+        return
+
+    depot_lat, depot_lon = geocode_location(depot)
+    if depot_lat is None:
+        messagebox.showerror("Error", "Failed to geocode depot location.")
+        return
+
+    # Cache unique addresses to minimize API calls
+    unique_addresses = df['Ubicazione'].unique()
+    address_cache = {}
+    
+    for addr in unique_addresses:
+        lat, lon = geocode_location(addr)
+        if lat is not None and lon is not None:
+            address_cache[addr] = (lat, lon)
+        root.update()
+
+    unassigned_tasks = {}
+    for index, row in df.iterrows():
+        addr = row['Ubicazione']
+        if addr in address_cache:
+            unassigned_tasks[index] = {
+                'cliente': row['Cliente'],
+                'ubicazione': addr,
+                'duration': timedelta(hours=float(row['Tempo'])),
+                'lat': address_cache[addr][0],
+                'lon': address_cache[addr][1]
+            }
+
+    schedule = []
+    skipped_tasks = []
+    current_day = 1
+    
+    base_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    current_time = base_date + timedelta(hours=start_time_base.hour, minutes=start_time_base.minute)
+    end_limit = base_date + timedelta(hours=end_time_base.hour, minutes=end_time_base.minute) + timedelta(minutes=30)
+    lunch_start_limit = base_date + timedelta(hours=12)
+    lunch_dur = timedelta(hours=lunch_duration_hours)
+    
+    current_lat, current_lon = depot_lat, depot_lon
+    lunch_taken = False
+    
+    empty_row = {
+        "Day": "",
+        "Cliente": "",
+        "Ubicazione": "",
+        "Start Time": "",
+        "End Time": "",
+        "Duration": ""
+    }
+    
+    schedule.append({
+        "Day": current_day,
+        "Cliente": "DEPOT START", 
+        "Ubicazione": depot,
+        "Start Time": current_time.strftime("%H:%M"),
+        "End Time": current_time.strftime("%H:%M"),
+        "Duration": format_duration(timedelta(0))
+    })
+
+    while unassigned_tasks:
+        best_task_key = None
+        min_dist = float('inf')
+        
+        # Identify the closest valid task
+        for key, task in unassigned_tasks.items():
+            dist_to_task = geodesic((current_lat, current_lon), (task['lat'], task['lon'])).kilometers
+            travel_to_task = timedelta(hours=dist_to_task / 50.0)
+            
+            dist_to_depot = geodesic((task['lat'], task['lon']), (depot_lat, depot_lon)).kilometers
+            travel_to_depot = timedelta(hours=dist_to_depot / 50.0)
+            
+            # Simulate timeline to ensure task and return journey fits in the workday
+            sim_time, sim_lunch = simulate_event(current_time, travel_to_task, lunch_taken, lunch_start_limit, lunch_dur)
+            sim_time, sim_lunch = simulate_event(sim_time, task['duration'], sim_lunch, lunch_start_limit, lunch_dur)
+            sim_time, sim_lunch = simulate_event(sim_time, travel_to_depot, sim_lunch, lunch_start_limit, lunch_dur)
+            
+            if sim_time <= end_limit:
+                if dist_to_task < min_dist:
+                    min_dist = dist_to_task
+                    best_task_key = key
                     
-    output_filename = "schedule_output.csv"
-    with open(output_filename, mode='w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f, delimiter=';')
-        writer.writerows(csv_rows)
-        
-    print(f"\nOptimization complete. CSV saved to {output_filename}.")
+        # If no tasks fit, close the day
+        if best_task_key is None:
+            day_start_time = base_date + timedelta(hours=start_time_base.hour, minutes=start_time_base.minute)
+            if current_time == day_start_time:
+                # The remaining task is too long to fit into any single workday
+                longest_key = max(unassigned_tasks, key=lambda k: unassigned_tasks[k]['duration'])
+                skipped_tasks.append(unassigned_tasks.pop(longest_key)['cliente'])
+                continue
 
-
-
-def run_gui():
-
-    def browse_file():
-        # Added .xlsm for macro-enabled workbooks and .xls for legacy formats
-        filename = filedialog.askopenfilename(filetypes=[
-            ("Excel files", "*.xlsx *.xlsm *.xls"),
-            ("All files", "*.*")
-        ])
-        entry_file.delete(0, tk.END)
-        entry_file.insert(0, filename)
-
-    def start_optimization():
-        try:
-            file_path = entry_file.get()
-            depot = entry_depot.get()
-            teams = int(entry_teams.get())
-            start = int(entry_start.get())
-            end = int(entry_end.get())
-            lunch = float(entry_lunch.get())
+            # Log return to depot
+            if (current_lat, current_lon) != (depot_lat, depot_lon):
+                dist = geodesic((current_lat, current_lon), (depot_lat, depot_lon)).kilometers
+                travel_time = timedelta(hours=dist / 50.0)
+                current_time, lunch_taken = execute_event(
+                    schedule, "RETURN TO DEPOT", depot, travel_time, 
+                    current_time, lunch_taken, lunch_start_limit, lunch_dur, current_day
+                )
             
-            # Richiama la funzione principale
-            optimize_schedule(file_path, depot, teams, start, end, lunch)
-            messagebox.showinfo("Successo", "Ottimizzazione completata! Controlla 'schedule_output.csv'")
-        except Exception as e:
-            messagebox.showerror("Errore", f"Si è verificato un errore: {e}")
+            schedule.append(empty_row)
+            
+            # Reset parameters for the next working day
+            current_day += 1
+            base_date += timedelta(days=1)
+            current_time = base_date + timedelta(hours=start_time_base.hour, minutes=start_time_base.minute)
+            end_limit = base_date + timedelta(hours=end_time_base.hour, minutes=end_time_base.minute) + timedelta(minutes=30)
+            lunch_start_limit = base_date + timedelta(hours=12)
+            current_lat, current_lon = depot_lat, depot_lon
+            lunch_taken = False
+            
+            schedule.append({
+                "Day": current_day,
+                "Cliente": "DEPOT START", 
+                "Ubicazione": depot,
+                "Start Time": current_time.strftime("%H:%M"),
+                "End Time": current_time.strftime("%H:%M"),
+                "Duration": format_duration(timedelta(0))
+            })
+            continue
+            
+        task = unassigned_tasks.pop(best_task_key)
+        
+        # Execute Travel to Task
+        if (current_lat, current_lon) != (task['lat'], task['lon']):
+            dist_km = geodesic((current_lat, current_lon), (task['lat'], task['lon'])).kilometers
+            travel_dur = timedelta(hours=dist_km / 50.0)
+            current_time, lunch_taken = execute_event(
+                schedule, "TRAVEL", f"To: {task['ubicazione']}", travel_dur, 
+                current_time, lunch_taken, lunch_start_limit, lunch_dur, current_day
+            )
+            current_lat, current_lon = task['lat'], task['lon']
+            
+        # Execute Task Operations
+        current_time, lunch_taken = execute_event(
+            schedule, task['cliente'], task['ubicazione'], task['duration'], 
+            current_time, lunch_taken, lunch_start_limit, lunch_dur, current_day
+        )
 
+    # Conclude the final day with a return to the depot
+    if (current_lat, current_lon) != (depot_lat, depot_lon):
+        dist = geodesic((current_lat, current_lon), (depot_lat, depot_lon)).kilometers
+        travel_time = timedelta(hours=dist / 50.0)
+        execute_event(
+            schedule, "RETURN TO DEPOT", depot, travel_time, 
+            current_time, lunch_taken, lunch_start_limit, lunch_dur, current_day
+        )
+
+    # Export output
+    out_df = pd.DataFrame(schedule)
+    base_name = os.path.splitext(file_path)[0]
+    out_path = f"{base_name}_scheduled.xlsx"
+    out_df.to_excel(out_path, index=False)
+    
+    status_msg = f"Schedule created successfully.\nOutput saved to:\n{out_path}"
+    if skipped_tasks:
+        status_msg += f"\n\nWARNING: Skipped tasks due to exceeding daily limits:\n{', '.join(skipped_tasks)}"
+        messagebox.showwarning("Warning", status_msg)
+    else:
+        messagebox.showinfo("Success", status_msg)
+
+def run_app():
     root = tk.Tk()
-    root.title("Imeca Routing Optimizer")
+    root.title("Worker Task Scheduler")
+    root.geometry("450x350")
+    root.resizable(False, False)
+    
+    tk.Label(root, text="Depot Location (Starting Point):").pack(pady=(15, 2))
+    depot_entry = tk.Entry(root, width=50)
+    depot_entry.pack()
+    
+    tk.Label(root, text="Start Time (HH:MM):").pack(pady=(10, 2))
+    start_entry = tk.Entry(root, width=20)
+    start_entry.insert(0, "08:00")
+    start_entry.pack()
+    
+    tk.Label(root, text="End Time (HH:MM):").pack(pady=(10, 2))
+    end_entry = tk.Entry(root, width=20)
+    end_entry.insert(0, "18:00")
+    end_entry.pack()
+    
+    tk.Label(root, text="Lunch Duration (Hours):").pack(pady=(10, 2))
+    lunch_entry = tk.Entry(root, width=20)
+    lunch_entry.insert(0, "1.0")
+    lunch_entry.pack()
+    
+    def on_submit():
+        if not depot_entry.get().strip():
+            messagebox.showerror("Error", "Please enter a Depot Location.")
+            return
 
-    # Layout GUI
-    tk.Label(root, text="File Excel:").grid(row=0, column=0, padx=5, pady=5)
-    entry_file = tk.Entry(root, width=40)
-    entry_file.grid(row=0, column=1, padx=5, pady=5)
-    tk.Button(root, text="Sfoglia", command=browse_file).grid(row=0, column=2, padx=5, pady=5)
+        file_path = filedialog.askopenfilename(
+            title="Select Input Excel File",
+            filetypes=[("Excel files", "*.xlsx *.xls")]
+        )
+        
+        if file_path:
+            try:
+                lunch_duration = float(lunch_entry.get())
+            except ValueError:
+                messagebox.showerror("Error", "Lunch duration must be a number.")
+                return
+            
+            submit_btn.config(state="disabled", text="Processing...")
+            root.update()
 
-    tk.Label(root, text="Ubicazione Deposito:").grid(row=1, column=0, padx=5, pady=5)
-    entry_depot = tk.Entry(root)
-    entry_depot.insert(0, "Ceto")
-    entry_depot.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+            process_schedule(
+                file_path, 
+                depot_entry.get().strip(), 
+                start_entry.get().strip(), 
+                end_entry.get().strip(), 
+                lunch_duration,
+                root
+            )
+            
+            submit_btn.config(state="normal", text="Select Excel File and Generate")
 
-    tk.Label(root, text="Numero Squadre:").grid(row=2, column=0, padx=5, pady=5)
-    entry_teams = tk.Entry(root)
-    entry_teams.insert(0, "1")
-    entry_teams.grid(row=2, column=1, padx=5, pady=5, sticky="w")
-
-    tk.Label(root, text="Ora Inizio (es. 8):").grid(row=3, column=0, padx=5, pady=5)
-    entry_start = tk.Entry(root)
-    entry_start.insert(0, "8")
-    entry_start.grid(row=3, column=1, padx=5, pady=5, sticky="w")
-
-    tk.Label(root, text="Ora Fine (es. 18):").grid(row=4, column=0, padx=5, pady=5)
-    entry_end = tk.Entry(root)
-    entry_end.insert(0, "18")
-    entry_end.grid(row=4, column=1, padx=5, pady=5, sticky="w")
-
-    tk.Label(root, text="Ore Pranzo (es. 1.0):").grid(row=5, column=0, padx=5, pady=5)
-    entry_lunch = tk.Entry(root)
-    entry_lunch.insert(0, "1.0")
-    entry_lunch.grid(row=5, column=1, padx=5, pady=5, sticky="w")
-
-    tk.Button(root, text="Avvia Ottimizzazione", command=start_optimization, bg="green", fg="white").grid(row=6, column=1, pady=20)
-
+    submit_btn = tk.Button(root, text="Select Excel File and Generate", command=on_submit, height=2)
+    submit_btn.pack(pady=20)
+    
     root.mainloop()
 
-
-if __name__ == '__main__':
-    run_gui()
+if __name__ == "__main__":
+    run_app()
